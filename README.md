@@ -227,11 +227,13 @@ Multiple synth files can be applied in a single command (`apply a_synth.py b_syn
 ## Citation
 
 ```bibtex
-@article{blum2025xmix,
-  title     = {xMIx: High-Performance Serving-Time Platform for Mechanistic Interpretability Apps},
-  author    = {Blum, Michael and Silberstein, Mark and David, Yaniv},
-  journal   = {arXiv preprint},
-  year      = {2025},
-  note      = {arXiv link forthcoming}
+@misc{blum2026xmixhighperformanceservingtimeplatform,
+      title={xMIx: High-Performance Serving-Time Platform for Mechanistic Interpretability Apps}, 
+      author={Michael Blum and Mark Silberstein and Yaniv David},
+      year={2026},
+      eprint={2607.22595},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2607.22595}, 
 }
 ```
