@@ -1,5 +1,8 @@
 # xMIx
 
+> **CAA assignment submission:** See [CAA_ASSIGNMENT.md](CAA_ASSIGNMENT.md)
+> for the implementation, experiment, results, and reproduction instructions.
+
 **Serving-native Mechanistic Interpretability for production LLM inference.**
 
 **[📄 Download Paper (PDF)](https://github.com/mishaster/xMIx/releases/download/v1.0.0-preprint/xmix_preprint.pdf)**

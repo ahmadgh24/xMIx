@@ -1,0 +1,30 @@
+#model: qwen
+
+_caa_default_path = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
+    "artifacts",
+    "caa",
+    "qwen3-0.6b",
+    "sycophancy",
+    "layer_18.pt",
+)
+_caa_artifact_path = os.environ.get("CAA_VECTOR_PATH", _caa_default_path)
+_caa_artifact = torch.load(
+    _caa_artifact_path,
+    map_location="cpu",
+    weights_only=True,
+)
+self.caa_vector = _caa_artifact["vector"].to(
+    device=self.device,
+    dtype=self.model_config.dtype,
+)
+self.caa = ContrastiveActivationAdder(
+    steering_vector=self.caa_vector,
+    coefficient=float(os.environ.get("CAA_COEFFICIENT", "10.0")),
+    max_tokens=2048,
+)
+# Enable every activation row. The address-stable gate remains available for a
+# generated-token or activation-based policy later.
+self.caa.input_map.fill_(1)
+
+m.write(self.caa.run).layer([18]).submodule("mlp.post")

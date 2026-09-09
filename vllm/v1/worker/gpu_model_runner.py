@@ -166,6 +166,7 @@ from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.activations_extractor.read_activations import LinearProbe 
 from vllm.activations_extractor.read_activations import MLPProbe
 from vllm.activations_extractor.write_activations import (
+     ContrastiveActivationAdder,
      SteeringVectorAdder,
      SteeringVectorDotSubtractNormalized,
      SteeringLinear,
@@ -409,83 +410,42 @@ class GPUModelRunner(
         self.steering_vectors = torch.randn((1,), device=self.device, dtype=self.model_config.dtype)
         #self.scaling_vecs_per_token= torch.zeros((2048,MAX_VECS),dtype=torch.int32,device = self.device)
         self.scaling_vecs_per_token= torch.zeros((1,MAX_VECS),dtype=torch.int32,device = self.device)
-        #refusal_vector_path = "/home/michael/vllm/vllm/activations_extractor/applications/arditi_app_1/direction.pt"
-        #execution_avg_vector_path = "/home/michael/vllm/vllm/activations_extractor/applications/seal_app_2/execution_avg_vector.pt"
-        #reflection_avg_vector_path = "/home/michael/vllm/vllm/activations_extractor/applications/seal_app_2/reflection_avg_vector.pt"
-        #transition_avg_vector_path = "/home/michael/vllm/vllm/activations_extractor/applications/seal_app_2/transition_avg_vector.pt"
-        refusal_vector_path = "/home/michael.blum/vLLM_Patched/vllm/activations_extractor/applications/arditi_app_1/direction.pt"
-        execution_avg_vector_path = "/home/michael.blum/vLLM_Patched/vllm/activations_extractor/applications/seal_app_2/execution_avg_vector.pt"
-        reflection_avg_vector_path = "/home/michael.blum/vLLM_Patched/vllm/activations_extractor/applications/seal_app_2/reflection_avg_vector.pt"
-        transition_avg_vector_path = "/home/michael.blum/vLLM_Patched/vllm/activations_extractor/applications/seal_app_2/transition_avg_vector.pt"
-        #self.steering_vector = torch.load(vector_path)
-        self.raw_execution_vector = torch.load(execution_avg_vector_path, map_location=self.device, weights_only=True).to(self.model_config.dtype)
-        self.raw_reflection_vector = torch.load(reflection_avg_vector_path , map_location=self.device, weights_only=True).to(self.model_config.dtype)
-        self.raw_transition_vector = torch.load(transition_avg_vector_path , map_location=self.device, weights_only=True).to(self.model_config.dtype)
-        self.combined_tensor = torch.stack([self.raw_execution_vector,self.raw_reflection_vector,self.raw_transition_vector], dim=0)
-        self.refusal_vector = torch.load(refusal_vector_path, map_location=self.device, weights_only=True).to(self.model_config.dtype)
-        self.arbitrary_vector = torch.full((self.hidden_size,), 0.1,device=self.device, dtype=self.model_config.dtype)
-        #self.refusal_vector = torch.nn.functional.normalize(raw_refusal_vector, p=2, dim=-1).unsqueeze(0)
         self.steered_tokens_index_vector= torch.zeros((1,),dtype = torch.int32, device=self.device)
         self.steered_tokens_num  = torch.zeros((1,),dtype= torch.int32, device = self.device)
         self.steered_indices_vectors = torch.zeros((1,MAX_VECS),dtype=torch.int32,device=self.device)
         self.vecs_per_token_num = torch.zeros((MAX_VECS,),dtype=torch.int32,device=self.device)
-        self.vec_indices = torch.full((2048,),1, dtype=torch.int32, device=self.device)
 
-        # App 5 - SteerMoe Mixtral       
-        #hf = self.model_config.hf_config
-        #num_layers  = hf.num_hidden_layers
-        #num_experts = hf.num_local_experts
-        # (L, E) sign tensor — replace with torch.load(...) of a real SteerMoE artifact
-        #self.moe_router_weights = torch.zeros((num_layers, num_experts), dtype=torch.int32, device=self.device,)
-        self.moe_router_weights = torch.load( "/home/michael.blum/vLLM_Patched/vllm/activations_extractor/applications/steermoe_app_5/moe_weights_mixtral_safety.pt",
-            map_location=self.device,)
-        # Shared per-token gate. All-ones = SteerMoE-faithful (unconditional).
-        self.moe_router_input_map = torch.ones(2048, dtype=torch.int32, device=self.device)
-        self.moe_router_steerers = []
-        # APP 6
-        self.w6 = torch.rand((self.hidden_size, self.hidden_size),device=self.device,dtype=self.model_config.dtype)        
-        self.b6 = self.fc1_bias = torch.rand((self.hidden_size),dtype=self.model_config.dtype,device=self.device) 
-        self.linear_steer = SteeringLinear(W =self.w6, b = self.b6, vec_indices = self.vec_indices, max_tokens = 2048) 
-
-        # App 2
-        MAX_VECS=3
-        scales = torch.tensor([0.5,0.5,-0.5],device=self.device,dtype=self.model_config.dtype)
-        self.scales_across_all_tokens = scales.repeat(2048,1)
-
-        steering_vec_indices = torch.tensor([0,1,2],device=self.device,dtype=torch.int32)
-        self.indices_across_all_tokens = steering_vec_indices.repeat(2048,1)
-        self.num_of_vecs_across_all_tokens = torch.full((2048,), 3, device=self.device, dtype=torch.int32)
-                
-        #self.app_2_num_vec_steer_indices= torch.zeros((2048,MAX_VECS),dtype = torch.int32, device=self.device)
-
-        self.steer_instance = SteeringVectorAdder(r = self.combined_tensor, scales=self.scales_across_all_tokens,
-                                                     vec_indices=  self.indices_across_all_tokens,
-                                                     n_vecs_per_token=self.num_of_vecs_across_all_tokens)
-        # App 7
-        self.r_7 = torch.rand((self.hidden_size),dtype=self.model_config.dtype,device=self.device)  
-        self.scalar_7 = torch.rand((1),dtype=self.model_config.dtype,device=self.device)
-        self.kl_than_steer = SteeringVectorScaledAdder(r=self.r_7,coeff=self.scalar_7,max_tokens=2048)
-        # Misha change - end
-        # App 4
-        # Truth Probe, 1 Linear Probe, LLMs Know More Than They Show Paper
-        self.truth_probe_weight = torch.rand((1,self.model_config.hidden_size),dtype=self.model_config.dtype,device = self.device)
-        self.truth_probe_bias = torch.rand((1,),dtype=self.model_config.dtype,device = self.device)
-        self.truth_probe = LinearProbe(max_tokens = 2048, weights= self.truth_probe_weight, bias = self.truth_probe_bias)
-        # App 1 Config for Llama (for real refusal):
-        #steer_refusal_vec = SteeringVectorDotSubtractNormalized(hidden_size = self.model_config.hidden_size, max_tokens = 2048,steering_vector = self.refusal_vector,
-        #    vec_indices = self.vec_indices,
-        #    dtype = self.model_config.dtype, device = self.device) 
-        # App 1 Config for others
-        #self.steer_refusal_vec = SteeringVectorDotSubtractNormalized(hidden_size = self.model_config.hidden_size, max_tokens = 2048,
-        #    steering_vector = self.arbitrary_vector, vec_indices = self.vec_indices, dtype = self.model_config.dtype, device = self.device) 
-
-        # App 3 Llama
-        #self.condition_projector = torch.full((self.model_config.hidden_size,self.model_config.hidden_size), 0.1, device=self.device, dtype=torch.float32)
-        #self.cosine_similarity_instance = CondProjCosSim(condition_projector= self.condition_projector , threshold=0.2, max_tokens = 2048)
-        #self.cosine_similarity_instance.set_output_buffers(out_bool=[steer_refusal_vec.vec_indices])
-        # Sampler
+        # Legacy demo applications used to allocate their tensors and load
+        # developer-local artifacts here for every model.  Applications now own
+        # their setup so an inactive demo cannot prevent the runner from starting.
         
         # xmix:anchor runner_setup
+        # xmix:begin caa runner_setup
+        _caa_default_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
+            "artifacts",
+            "caa",
+            "qwen3-0.6b",
+            "sycophancy",
+            "layer_18.pt",
+        )
+        _caa_artifact_path = os.environ.get("CAA_VECTOR_PATH", _caa_default_path)
+        _caa_artifact = torch.load(
+            _caa_artifact_path,
+            map_location="cpu",
+            weights_only=True,
+        )
+        self.caa_vector = _caa_artifact["vector"].to(
+            device=self.device,
+            dtype=self.model_config.dtype,
+        )
+        self.caa = ContrastiveActivationAdder(
+            steering_vector=self.caa_vector,
+            coefficient=float(os.environ.get("CAA_COEFFICIENT", "10.0")),
+            max_tokens=2048,
+        )
+        self.caa.input_map.fill_(1)
+        # xmix:end caa runner_setup
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
 
         self.eplb_state: EplbState | None = None
@@ -4159,6 +4119,15 @@ class GPUModelRunner(
                 #num_experts = hf.num_local_experts
 
                 # xmix:anchor runner_postload 
+                # xmix:begin caa runner_postload
+                # xmix:footprint caa w mlp.post 18
+                # vllm/activations_extractor/applications/xmix_examples/caa.xmix:30  m.write(self.caa.run).layers([18]).submodule("mlp.post")
+                # steer ContrastiveActivationAdder on layers [18] at 'mlp.post' (flag 'w')
+                for layer in self.model.model.layers:
+                    idx = layer.self_attn.layer_idx
+                    if idx in (18,):
+                        layer.set_post_mlp_hook(self.caa.run, "w")
+                # xmix:end caa runner_postload
                 #if hasattr(self.model.model,"layers"):
                     #self.model.model.token_detector.set_output_buffers(steer_instance.token_indices,steer_instance.n_valid_buf)
                     #for layer in self.model.model.layers:

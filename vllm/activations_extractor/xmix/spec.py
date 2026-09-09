@@ -114,6 +114,20 @@ SPEC = {
             # SteeringVectorScaledAdder(r, coeff, max_tokens)
             args={"r": None, "coeff": None, "max_tokens": "2048"},
         ),
+        "ContrastiveActivationAdder": OpSpec(
+            cls_path="vllm.activations_extractor.write_activations.ContrastiveActivationAdder",
+            flag="w",
+            arity=0,
+            method="run",
+            build_kind=None,
+            # ContrastiveActivationAdder(steering_vector, coefficient,
+            #                            max_tokens)
+            args={
+                "steering_vector": None,
+                "coefficient": None,
+                "max_tokens": "2048",
+            },
+        ),
         "SteeringLinear": OpSpec(
             cls_path="vllm.activations_extractor.write_activations.SteeringLinear",
             flag="w",

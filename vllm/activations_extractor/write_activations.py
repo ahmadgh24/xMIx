@@ -162,6 +162,163 @@ class SteeringVectorScaledAdder(torch.nn.Module):
         return self(x)
 
 
+# Contrastive Activation Addition (CAA).
+@triton.jit
+def caa_add_kernel(
+    x_ptr,
+    steering_vector_ptr,
+    coefficient_ptr,
+    input_map_ptr,
+    hidden_size,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Add a scaled CAA steering vector to activation rows in place.
+
+    Computes ``x[row, col] += coefficient * steering_vector[col]`` for
+    every enabled activation row in the launch grid. ``input_map[row] == 0``
+    leaves that row unchanged.
+    """
+    row         = tl.program_id(axis=0)
+    col_block   = tl.program_id(axis=1)
+    col_offsets = col_block * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    row_enabled = tl.load(input_map_ptr + row) != 0
+    mask        = (col_offsets < hidden_size) & row_enabled
+
+    coeff = tl.load(coefficient_ptr)
+
+    x = tl.load(x_ptr + row * hidden_size + col_offsets, mask=mask)
+    r = tl.load(steering_vector_ptr + col_offsets,       mask=mask, other=0.0)
+
+    tl.store(x_ptr + row * hidden_size + col_offsets,
+                   x + coeff * r, mask=mask)
+
+
+class ContrastiveActivationAdder(torch.nn.Module):
+    """Apply a precomputed CAA steering vector during inference.
+
+    The contrastive steering vector should be computed offline. This module is
+    responsible only for applying that vector during a model forward pass.
+    ``input_map[row] != 0`` enables steering for that activation row.
+    """
+
+    _BLOCK_SIZE = 1024
+
+    def __init__(
+        self,
+        steering_vector: torch.Tensor,
+        coefficient,
+        max_tokens: int,
+    ):
+        super().__init__()
+        assert steering_vector.ndim == 1, \
+            ("steering_vector must be 1-D (hidden_size,), got shape "
+             f"{tuple(steering_vector.shape)}")
+
+        self.hidden_size = steering_vector.shape[0]
+        self.max_tokens  = max_tokens
+        assert max_tokens > 0, f"max_tokens must be positive, got {max_tokens}"
+
+        self.register_parameter('steering_vector',
+            torch.nn.Parameter(steering_vector.detach().clone(),
+                               requires_grad=False))
+
+        if not torch.is_tensor(coefficient):
+            coeff_t = torch.tensor([float(coefficient)],
+                                   dtype=steering_vector.dtype,
+                                   device=steering_vector.device)
+        else:
+            assert coefficient.numel() == 1, \
+                ("coefficient must contain one value, got shape "
+                 f"{tuple(coefficient.shape)}")
+            coeff_t = coefficient.reshape(1).to(
+                dtype=steering_vector.dtype,
+                device=steering_vector.device,
+            ).clone()
+
+        self.register_parameter('coefficient',
+            torch.nn.Parameter(coeff_t, requires_grad=False))
+
+        # Per-row gate populated before forward, either through load_mask() or
+        # directly by an upstream GPU condition/detector kernel. Its storage is
+        # fixed so downstream CUDA graphs can safely retain its address.
+        self.register_parameter(
+            'input_map',
+            torch.nn.Parameter(
+                torch.zeros(max_tokens, dtype=torch.int32,
+                            device=steering_vector.device),
+                requires_grad=False,
+            ),
+        )
+
+    def load_vector(self, steering_vector: torch.Tensor) -> None:
+        """Replace the CAA direction without changing its GPU address."""
+        assert steering_vector.shape == self.steering_vector.shape, \
+            f"Shape mismatch: expected {self.steering_vector.shape}, got {steering_vector.shape}"
+        self.steering_vector.copy_(steering_vector)
+
+    def load_coefficient(self, coefficient) -> None:
+        """Replace the steering strength without changing its GPU address."""
+        if not torch.is_tensor(coefficient):
+            coefficient = torch.tensor([float(coefficient)], dtype=self.coefficient.dtype,
+                             device=self.coefficient.device)
+        else:
+            assert coefficient.numel() == 1, \
+                ("coefficient must contain one value, got shape "
+                 f"{tuple(coefficient.shape)}")
+            coefficient = coefficient.reshape(1).to(dtype=self.coefficient.dtype,
+                                                     device=self.coefficient.device)
+        self.coefficient.copy_(coefficient)
+
+    def load_mask(self, input_map: torch.Tensor) -> None:
+        """Copy a per-row steering gate into the address-stable input map."""
+        assert input_map.ndim == 1, \
+            f"input_map must be 1-D, got shape {tuple(input_map.shape)}"
+        assert input_map.numel() <= self.max_tokens, \
+            (f"input_map has {input_map.numel()} rows, but max_tokens is "
+             f"{self.max_tokens}")
+
+        self.input_map.zero_()
+        self.input_map[:input_map.numel()].copy_(
+            input_map.to(dtype=torch.int32, device=self.input_map.device)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Launch the CAA Triton kernel and return the modified activation."""
+        hidden_size = x.shape[-1]
+        assert hidden_size == self.hidden_size, \
+            f"Hidden-size mismatch: expected {self.hidden_size}, got {hidden_size}"
+        assert x.device == self.steering_vector.device, \
+            (f"Device mismatch: activations are on {x.device}, vector is on "
+             f"{self.steering_vector.device}")
+        assert x.dtype == self.steering_vector.dtype, \
+            (f"Dtype mismatch: activations use {x.dtype}, vector uses "
+             f"{self.steering_vector.dtype}")
+        assert x.is_contiguous(), "CAA activations must be contiguous"
+
+        n_rows      = x.numel() // hidden_size
+        assert n_rows <= self.max_tokens, \
+            f"CAA received {n_rows} rows, but max_tokens is {self.max_tokens}"
+        x_2d        = x.view(n_rows, hidden_size)
+        grid        = (n_rows, triton.cdiv(hidden_size, self._BLOCK_SIZE))
+
+        caa_add_kernel[grid](
+            x_2d, self.steering_vector, self.coefficient,
+            self.input_map,
+            hidden_size,
+            BLOCK_SIZE=self._BLOCK_SIZE,
+        )
+        return x
+
+    def run(
+        self,
+        x: torch.Tensor,
+        r: torch.Tensor,
+        steered_tokens_num: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply gated CAA through xMIx's write-hook contract."""
+        return self(x)
+
+
 # Michael conditional kernel
 @triton.jit
 def conditional_add_kernel(
@@ -1236,4 +1393,3 @@ class SteeringLinear(torch.nn.Module):
 
     def run(self, x: torch.Tensor, r: torch.Tensor,steered_tokens_num:torch.Tensor) -> torch.Tensor:
         return self(x)
-
